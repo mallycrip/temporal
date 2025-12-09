@@ -59,11 +59,12 @@ func (l *library) RegisterServices(server *grpc.Server) {
 
 func (l *library) Tasks() []*chasm.RegistrableTask {
 	return []*chasm.RegistrableTask{
-		chasm.NewRegistrableSideEffectTask[*Activity, *activitypb.ActivityDispatchTask](
+		chasm.NewRegistrableSideEffectTask(
 			"dispatch",
 			l.activityDispatchTaskExecutor,
 			l.activityDispatchTaskExecutor,
 		),
+		// TODO(dan): why are the task names "FooTimer" but "FooTimeoutTask" in the struct names?
 		chasm.NewRegistrablePureTask(
 			"scheduleToStartTimer",
 			l.scheduleToStartTimeoutTaskExecutor,

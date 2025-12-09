@@ -11,6 +11,9 @@ import (
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/chasm/lib/activity/gen/activitypb/v1"
 	"go.temporal.io/server/common/contextutil"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/tqid"
 )
 
 var (
@@ -28,12 +31,16 @@ var (
 
 type handler struct {
 	activitypb.UnimplementedActivityServiceServer
-	config *Config
+	config            *Config
+	metricsHandler    metrics.Handler
+	namespaceRegistry namespace.Registry
 }
 
-func newHandler(config *Config) *handler {
+func newHandler(config *Config, metricsHandler metrics.Handler, namespaceRegistry namespace.Registry) *handler {
 	return &handler{
-		config: config,
+		config:            config,
+		metricsHandler:    metricsHandler,
+		namespaceRegistry: namespaceRegistry,
 	}
 }
 
@@ -76,7 +83,6 @@ func (h *handler) StartActivityExecution(ctx context.Context, req *activitypb.St
 		chasm.WithRequestID(req.GetFrontendRequest().GetRequestId()),
 		chasm.WithBusinessIDPolicy(reusePolicy, conflictPolicy),
 	)
-
 	if err != nil {
 		return nil, err
 	}
@@ -253,11 +259,37 @@ func (h *handler) RequestCancelActivityExecution(
 		RunID:       frontendReq.GetRunId(),
 	})
 
+	breakdownMetricsByTaskQueue := h.config.BreakdownMetricsByTaskQueue
+	namespaceName, err := h.namespaceRegistry.GetNamespaceName(namespace.ID(req.GetNamespaceId()))
+	if err != nil {
+		return nil, err
+	}
+
+	metricsHandlerBuilderParams, err := chasm.ReadComponent(ctx, ref, (*Activity).GetMetricsHandlerParams, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	taskQueueFamily := metricsHandlerBuilderParams.TaskQueueName
+
+	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+		h.metricsHandler,
+		namespaceName.String(),
+		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
+		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
+		metrics.ActivityTypeTag(metricsHandlerBuilderParams.ActivityType),
+		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+	)
+
 	response, _, err = chasm.UpdateComponent(
 		ctx,
 		ref,
 		(*Activity).handleCancellationRequested,
-		req,
+		RequestCancelActivityReqWrapper{
+			request:        req,
+			metricsHandler: metricsHandler,
+		},
 	)
 	if err != nil {
 		return nil, err

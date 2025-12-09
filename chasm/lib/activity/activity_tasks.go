@@ -6,7 +6,10 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/chasm/lib/activity/gen/activitypb/v1"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/resource"
+	"go.temporal.io/server/common/tqid"
 	"go.temporal.io/server/common/util"
 	"go.uber.org/fx"
 )
@@ -59,10 +62,22 @@ func (e *activityDispatchTaskExecutor) Execute(
 	return err
 }
 
-type scheduleToStartTimeoutTaskExecutor struct{}
+type timeoutTaskExecutorOptions struct {
+	fx.In
 
-func newScheduleToStartTimeoutTaskExecutor() *scheduleToStartTimeoutTaskExecutor {
-	return &scheduleToStartTimeoutTaskExecutor{}
+	Config            *Config
+	MetricsHandler    metrics.Handler
+	NamespaceRegistry namespace.Registry
+}
+
+type scheduleToStartTimeoutTaskExecutor struct {
+	opts timeoutTaskExecutorOptions
+}
+
+func newScheduleToStartTimeoutTaskExecutor(opts timeoutTaskExecutorOptions) *scheduleToStartTimeoutTaskExecutor {
+	return &scheduleToStartTimeoutTaskExecutor{
+		opts,
+	}
 }
 
 func (e *scheduleToStartTimeoutTaskExecutor) Validate(
@@ -81,13 +96,41 @@ func (e *scheduleToStartTimeoutTaskExecutor) Execute(
 	_ chasm.TaskAttributes,
 	_ *activitypb.ScheduleToStartTimeoutTask,
 ) error {
-	return TransitionTimedOut.Apply(activity, ctx, enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START)
+	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
+	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
+	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
+	if err != nil {
+		return err
+	}
+
+	taskQueueFamily := activity.GetTaskQueue().GetName()
+
+	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+		e.opts.MetricsHandler,
+		namespaceName.String(),
+		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
+		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
+		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
+		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+	)
+
+	event := timeoutEvent{
+		timeoutType:    enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START,
+		metricsHandler: metricsHandler,
+	}
+
+	return TransitionTimedOut.Apply(activity, ctx, event)
 }
 
-type scheduleToCloseTimeoutTaskExecutor struct{}
+type scheduleToCloseTimeoutTaskExecutor struct {
+	opts timeoutTaskExecutorOptions
+}
 
-func newScheduleToCloseTimeoutTaskExecutor() *scheduleToCloseTimeoutTaskExecutor {
-	return &scheduleToCloseTimeoutTaskExecutor{}
+func newScheduleToCloseTimeoutTaskExecutor(opts timeoutTaskExecutorOptions) *scheduleToCloseTimeoutTaskExecutor {
+	return &scheduleToCloseTimeoutTaskExecutor{
+		opts,
+	}
 }
 
 func (e *scheduleToCloseTimeoutTaskExecutor) Validate(
@@ -105,13 +148,41 @@ func (e *scheduleToCloseTimeoutTaskExecutor) Execute(
 	_ chasm.TaskAttributes,
 	_ *activitypb.ScheduleToCloseTimeoutTask,
 ) error {
-	return TransitionTimedOut.Apply(activity, ctx, enumspb.TIMEOUT_TYPE_SCHEDULE_TO_CLOSE)
+	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
+	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
+	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
+	if err != nil {
+		return err
+	}
+
+	taskQueueFamily := activity.GetTaskQueue().GetName()
+
+	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+		e.opts.MetricsHandler,
+		namespaceName.String(),
+		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
+		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
+		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
+		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+	)
+
+	event := timeoutEvent{
+		timeoutType:    enumspb.TIMEOUT_TYPE_SCHEDULE_TO_CLOSE,
+		metricsHandler: metricsHandler,
+	}
+
+	return TransitionTimedOut.Apply(activity, ctx, event)
 }
 
-type startToCloseTimeoutTaskExecutor struct{}
+type startToCloseTimeoutTaskExecutor struct {
+	opts timeoutTaskExecutorOptions
+}
 
-func newStartToCloseTimeoutTaskExecutor() *startToCloseTimeoutTaskExecutor {
-	return &startToCloseTimeoutTaskExecutor{}
+func newStartToCloseTimeoutTaskExecutor(opts timeoutTaskExecutorOptions) *startToCloseTimeoutTaskExecutor {
+	return &startToCloseTimeoutTaskExecutor{
+		opts,
+	}
 }
 
 func (e *startToCloseTimeoutTaskExecutor) Validate(
@@ -136,23 +207,57 @@ func (e *startToCloseTimeoutTaskExecutor) Execute(
 		return err
 	}
 
+	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
+	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
+	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
+	if err != nil {
+		return err
+	}
+
+	taskQueueFamily := activity.GetTaskQueue().GetName()
+
+	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+		e.opts.MetricsHandler,
+		namespaceName.String(),
+		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
+		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
+		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
+		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+	)
+
 	// Retry task if we have remaining attempts and time. A retry involves transitioning the activity back to scheduled state.
 	if shouldRetry {
-		return TransitionRescheduled.Apply(activity, ctx, rescheduleEvent{
+		err = TransitionRescheduled.Apply(activity, ctx, rescheduleEvent{
 			retryInterval: retryInterval,
 			failure:       createStartToCloseTimeoutFailure(),
+			timeoutType:   enumspb.TIMEOUT_TYPE_START_TO_CLOSE,
 		})
+		if err != nil {
+			return err
+		}
+
+		activity.emitOnAttemptTimedOutMetrics(ctx, metricsHandler, enumspb.TIMEOUT_TYPE_START_TO_CLOSE)
+
+		return nil
 	}
 
 	// Reached maximum attempts, timeout the activity
-	return TransitionTimedOut.Apply(activity, ctx, enumspb.TIMEOUT_TYPE_START_TO_CLOSE)
+	return TransitionTimedOut.Apply(activity, ctx, timeoutEvent{
+		timeoutType:    enumspb.TIMEOUT_TYPE_START_TO_CLOSE,
+		metricsHandler: metricsHandler,
+	})
 }
 
 // HeartbeatTimeoutTask is a pure task that enforces heartbeat timeouts.
-type heartbeatTimeoutTaskExecutor struct{}
+type heartbeatTimeoutTaskExecutor struct {
+	opts timeoutTaskExecutorOptions
+}
 
-func newHeartbeatTimeoutTaskExecutor() *heartbeatTimeoutTaskExecutor {
-	return &heartbeatTimeoutTaskExecutor{}
+func newHeartbeatTimeoutTaskExecutor(opts timeoutTaskExecutorOptions) *heartbeatTimeoutTaskExecutor {
+	return &heartbeatTimeoutTaskExecutor{
+		opts,
+	}
 }
 
 // Validate validates a HeartbeatTimeoutTask.
@@ -208,11 +313,43 @@ func (e *heartbeatTimeoutTaskExecutor) Execute(
 	if err != nil {
 		return err
 	}
+
+	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
+	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
+	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
+	if err != nil {
+		return err
+	}
+
+	taskQueueFamily := activity.GetTaskQueue().GetName()
+
+	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+		e.opts.MetricsHandler,
+		namespaceName.String(),
+		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
+		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
+		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
+		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+	)
+
 	if shouldRetry {
-		return TransitionRescheduled.Apply(activity, ctx, rescheduleEvent{
+		err = TransitionRescheduled.Apply(activity, ctx, rescheduleEvent{
 			retryInterval: retryInterval,
 			failure:       createHeartbeatTimeoutFailure(),
+			timeoutType:   enumspb.TIMEOUT_TYPE_HEARTBEAT,
 		})
+		if err != nil {
+			return err
+		}
+
+		activity.emitOnAttemptTimedOutMetrics(ctx, metricsHandler, enumspb.TIMEOUT_TYPE_HEARTBEAT)
+
+		return nil
 	}
-	return TransitionTimedOut.Apply(activity, ctx, enumspb.TIMEOUT_TYPE_HEARTBEAT)
+
+	return TransitionTimedOut.Apply(activity, ctx, timeoutEvent{
+		timeoutType:    enumspb.TIMEOUT_TYPE_HEARTBEAT,
+		metricsHandler: metricsHandler,
+	})
 }

@@ -13,6 +13,7 @@ import (
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/tasktoken"
+	"go.temporal.io/server/common/tqid"
 	"go.temporal.io/server/service/history/api"
 	"go.temporal.io/server/service/history/consts"
 	historyi "go.temporal.io/server/service/history/interfaces"
@@ -40,13 +41,31 @@ func Invoke(
 
 	// Handle standalone activity if component ref is present in the token
 	if componentRef := token.GetComponentRef(); len(componentRef) > 0 {
+		metricsHandlerBuilderParams, err := chasm.ReadComponent(ctx, componentRef, (*activity.Activity).GetMetricsHandlerParams, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		taskQueueName := metricsHandlerBuilderParams.TaskQueueName
+
+		handler := metrics.GetPerTaskQueueFamilyScope(
+			shard.GetMetricsHandler(),
+			namespace.String(),
+			tqid.UnsafeTaskQueueFamily(req.GetNamespaceId(), taskQueueName),
+			shard.GetConfig().BreakdownMetricsByTaskQueue(namespace.String(), taskQueueName, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+			metrics.OperationTag(metrics.HistoryRespondActivityTaskCompletedScope),
+			metrics.ActivityTypeTag(metricsHandlerBuilderParams.ActivityType),
+			metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+		)
+
 		response, _, err := chasm.UpdateComponent(
 			ctx,
 			componentRef,
 			(*activity.Activity).HandleCompleted,
-			activity.WithToken[*historyservice.RespondActivityTaskCompletedRequest]{
-				Token:   token,
-				Request: req,
+			activity.RespondCompletedReqWrapper{
+				Request:        req,
+				Token:          token,
+				MetricsHandler: handler,
 			},
 		)
 

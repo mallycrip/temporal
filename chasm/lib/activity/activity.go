@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/server/chasm/lib/activity/gen/activitypb/v1"
 	"go.temporal.io/server/common"
 	"go.temporal.io/server/common/backoff"
+	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/payload"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -59,6 +60,33 @@ type Activity struct {
 type WithToken[R any] struct {
 	Token   *tokenspb.Task
 	Request R
+}
+
+// RespondCompletedReqWrapper wraps the RespondActivityTaskCompletedRequest with context-specific data.
+type RespondCompletedReqWrapper struct {
+	Request        *historyservice.RespondActivityTaskCompletedRequest
+	Token          *tokenspb.Task
+	MetricsHandler metrics.Handler
+}
+
+// RespondFailedReqWrapper wraps the RespondActivityTaskFailedRequest with context-specific data.
+type RespondFailedReqWrapper struct {
+	Request        *historyservice.RespondActivityTaskFailedRequest
+	Token          *tokenspb.Task
+	MetricsHandler metrics.Handler
+}
+
+// RespondCancelledReqWrapper wraps the RespondActivityTaskCanceledRequest with context-specific data.
+type RespondCancelledReqWrapper struct {
+	Request        *historyservice.RespondActivityTaskCanceledRequest
+	Token          *tokenspb.Task
+	MetricsHandler metrics.Handler
+}
+
+// RequestCancelActivityReqWrapper wraps the RequestCancelActivityExecutionRequest with context-specific data.
+type RequestCancelActivityReqWrapper struct {
+	request        *activitypb.RequestCancelActivityExecutionRequest
+	metricsHandler metrics.Handler
 }
 
 func (a *Activity) LifecycleState(_ chasm.Context) chasm.LifecycleState {
@@ -137,6 +165,20 @@ func (a *Activity) createAddActivityTaskRequest(ctx chasm.Context, namespaceID s
 	}, nil
 }
 
+// MetricsHandlerBuilderParams contains parameters for building a metrics handler for activity operations.
+type MetricsHandlerBuilderParams struct {
+	ActivityType  string
+	TaskQueueName string
+}
+
+// GetMetricsHandlerParams retrieves parameters for building a metrics handler for activity operations.
+func (a *Activity) GetMetricsHandlerParams(_ chasm.Context, _ any) (MetricsHandlerBuilderParams, error) {
+	return MetricsHandlerBuilderParams{
+		ActivityType:  a.GetActivityType().GetName(),
+		TaskQueueName: a.GetTaskQueue().GetName(),
+	}, nil
+}
+
 // HandleStarted updates the activity on recording activity task started and populates the response.
 func (a *Activity) HandleStarted(ctx chasm.MutableContext, request *historyservice.RecordActivityTaskStartedRequest) (
 	*historyservice.RecordActivityTaskStartedResponse, error,
@@ -199,14 +241,14 @@ func (a *Activity) RecordCompleted(ctx chasm.MutableContext, applyFn func(ctx ch
 // HandleCompleted updates the activity on activity completion.
 func (a *Activity) HandleCompleted(
 	ctx chasm.MutableContext,
-	input WithToken[*historyservice.RespondActivityTaskCompletedRequest],
+	req RespondCompletedReqWrapper,
 ) (*historyservice.RespondActivityTaskCompletedResponse, error) {
 	// TODO(dan): add test coverage for this validation
-	if err := ValidateActivityTaskToken(ctx, a, input.Token); err != nil {
+	if err := ValidateActivityTaskToken(ctx, a, req.Token); err != nil {
 		return nil, err
 	}
 
-	if err := TransitionCompleted.Apply(a, ctx, input.Request); err != nil {
+	if err := TransitionCompleted.Apply(a, ctx, req); err != nil {
 		return nil, err
 	}
 
@@ -217,14 +259,14 @@ func (a *Activity) HandleCompleted(
 // for retry instead.
 func (a *Activity) HandleFailed(
 	ctx chasm.MutableContext,
-	input WithToken[*historyservice.RespondActivityTaskFailedRequest],
+	req RespondFailedReqWrapper,
 ) (*historyservice.RespondActivityTaskFailedResponse, error) {
 	// TODO(dan): add test coverage for this validation
-	if err := ValidateActivityTaskToken(ctx, a, input.Token); err != nil {
+	if err := ValidateActivityTaskToken(ctx, a, req.Token); err != nil {
 		return nil, err
 	}
 
-	failure := input.Request.GetFailedRequest().GetFailure()
+	failure := req.Request.GetFailedRequest().GetFailure()
 
 	shouldRetry, retryInterval, err := a.shouldRetryOnFailure(ctx, failure)
 	if err != nil {
@@ -239,11 +281,13 @@ func (a *Activity) HandleFailed(
 			return nil, err
 		}
 
+		a.emitOnAttemptFailedMetrics(ctx, req.MetricsHandler)
+
 		return &historyservice.RespondActivityTaskFailedResponse{}, nil
 	}
 
 	// No more retries, transition to failed state
-	if err := TransitionFailed.Apply(a, ctx, input.Request); err != nil {
+	if err := TransitionFailed.Apply(a, ctx, req); err != nil {
 		return nil, err
 	}
 
@@ -253,14 +297,17 @@ func (a *Activity) HandleFailed(
 // HandleCanceled updates the activity on activity canceled.
 func (a *Activity) HandleCanceled(
 	ctx chasm.MutableContext,
-	input WithToken[*historyservice.RespondActivityTaskCanceledRequest],
+	req RespondCancelledReqWrapper,
 ) (*historyservice.RespondActivityTaskCanceledResponse, error) {
 	// TODO(dan): add test coverage for this validation
-	if err := ValidateActivityTaskToken(ctx, a, input.Token); err != nil {
+	if err := ValidateActivityTaskToken(ctx, a, req.Token); err != nil {
 		return nil, err
 	}
 
-	if err := TransitionCanceled.Apply(a, ctx, input.Request.GetCancelRequest().GetDetails()); err != nil {
+	if err := TransitionCanceled.Apply(a, ctx, cancelEvent{
+		details: req.Request.GetCancelRequest().GetDetails(),
+		handler: req.MetricsHandler,
+	}); err != nil {
 		return nil, err
 	}
 
@@ -288,10 +335,11 @@ func (a *Activity) getOrCreateLastHeartbeat(ctx chasm.MutableContext) *activityp
 	return heartbeat
 }
 
-func (a *Activity) handleCancellationRequested(ctx chasm.MutableContext, req *activitypb.RequestCancelActivityExecutionRequest) (
+func (a *Activity) handleCancellationRequested(ctx chasm.MutableContext, reqWrapper RequestCancelActivityReqWrapper) (
 	*activitypb.RequestCancelActivityExecutionResponse, error,
 ) {
-	newReqID := req.GetFrontendRequest().GetRequestId()
+	req := reqWrapper.request.GetFrontendRequest()
+	newReqID := req.GetRequestId()
 	existingReqID := a.GetCancelState().GetRequestId()
 
 	// If already in cancel requested state, fail if request ID is different, else no-op
@@ -307,18 +355,21 @@ func (a *Activity) handleCancellationRequested(ctx chasm.MutableContext, req *ac
 	// If in scheduled state, cancel immediately right after marking cancel requested
 	isCancelImmediately := a.GetStatus() == activitypb.ACTIVITY_EXECUTION_STATUS_SCHEDULED
 
-	if err := TransitionCancelRequested.Apply(a, ctx, req.GetFrontendRequest()); err != nil {
+	if err := TransitionCancelRequested.Apply(a, ctx, req); err != nil {
 		return nil, err
 	}
 
 	if isCancelImmediately {
 		details := &commonpb.Payloads{
 			Payloads: []*commonpb.Payload{
-				payload.EncodeString(req.GetFrontendRequest().GetReason()),
+				payload.EncodeString(req.GetReason()),
 			},
 		}
 
-		err := TransitionCanceled.Apply(a, ctx, details)
+		err := TransitionCanceled.Apply(a, ctx, cancelEvent{
+			details: details,
+			handler: reqWrapper.metricsHandler,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -458,15 +509,16 @@ func createHeartbeatTimeoutFailure() *failurepb.Failure {
 // RecordHeartbeat records a heartbeat for the activity.
 func (a *Activity) RecordHeartbeat(
 	ctx chasm.MutableContext,
-	input WithToken[*historyservice.RecordActivityTaskHeartbeatRequest],
+	req WithToken[*historyservice.RecordActivityTaskHeartbeatRequest],
 ) (*historyservice.RecordActivityTaskHeartbeatResponse, error) {
-	err := ValidateActivityTaskToken(ctx, a, input.Token)
+	err := ValidateActivityTaskToken(ctx, a, req.Token)
 	if err != nil {
 		return nil, err
 	}
+
 	a.LastHeartbeat = chasm.NewDataField(ctx, &activitypb.ActivityHeartbeatState{
 		RecordedTime: timestamppb.New(ctx.Now(a)),
-		Details:      input.Request.GetHeartbeatRequest().GetDetails(),
+		Details:      req.Request.HeartbeatRequest.GetDetails(),
 	})
 	ctx.AddTask(
 		a,
@@ -634,4 +686,89 @@ func (a *Activity) StoreOrSelf(ctx chasm.Context) ActivityStore {
 		return store
 	}
 	return a
+}
+
+func (a *Activity) emitOnAttemptTimedOutMetrics(ctx chasm.Context, handler metrics.Handler, timeoutType enumspb.TimeoutType) {
+	// TODO ignore err for now as it won't be there after rebase on main
+	attempt := a.LastAttempt.Get(ctx)
+	startedTime := attempt.GetStartedTime().AsTime()
+
+	latency := time.Since(startedTime)
+	metrics.ActivityStartToCloseLatency.With(handler).Record(latency)
+
+	timeoutTag := metrics.StringTag("timeout_type", timeoutType.String())
+	metrics.ActivityTaskTimeout.With(handler).Record(1, timeoutTag)
+}
+
+func (a *Activity) emitOnAttemptFailedMetrics(ctx chasm.Context, handler metrics.Handler) {
+	// TODO ignore err for now as it won't be there after rebase on main
+	attempt := a.LastAttempt.Get(ctx)
+	startedTime := attempt.GetStartedTime().AsTime()
+
+	latency := time.Since(startedTime)
+	metrics.ActivityStartToCloseLatency.With(handler).Record(latency)
+
+	metrics.ActivityTaskFail.With(handler).Record(1)
+}
+
+func (a *Activity) emitOnCompletedMetrics(ctx chasm.Context, handler metrics.Handler) {
+	// TODO ignore err for now as it won't be there after rebase on main
+	attempt := a.LastAttempt.Get(ctx)
+	startedTime := attempt.GetStartedTime().AsTime()
+
+	startToCloseLatency := time.Since(startedTime)
+	metrics.ActivityStartToCloseLatency.With(handler).Record(startToCloseLatency)
+
+	scheduleToCloseLatency := time.Since(a.GetScheduleTime().AsTime())
+	metrics.ActivityScheduleToCloseLatency.With(handler).Record(scheduleToCloseLatency)
+
+	metrics.ActivitySuccess.With(handler).Record(1)
+}
+
+func (a *Activity) emitOnFailedMetrics(ctx chasm.Context, handler metrics.Handler) {
+	// TODO ignore err for now as it won't be there after rebase on main
+	attempt := a.LastAttempt.Get(ctx)
+	startedTime := attempt.GetStartedTime().AsTime()
+
+	startToCloseLatency := time.Since(startedTime)
+	metrics.ActivityStartToCloseLatency.With(handler).Record(startToCloseLatency)
+
+	scheduleToCloseLatency := time.Since(a.GetScheduleTime().AsTime())
+	metrics.ActivityScheduleToCloseLatency.With(handler).Record(scheduleToCloseLatency)
+
+	metrics.ActivityTaskFail.With(handler).Record(1)
+	metrics.ActivityFail.With(handler).Record(1)
+}
+
+func (a *Activity) emitOnCanceledMetrics(ctx chasm.Context, handler metrics.Handler) {
+	// TODO ignore err for now as it won't be there after rebase on main
+	attempt := a.LastAttempt.Get(ctx)
+	startedTime := attempt.GetStartedTime().AsTime()
+
+	// Cancel can happen before start, so guard against zero time
+	if !startedTime.IsZero() {
+		startToCloseLatency := time.Since(startedTime)
+		metrics.ActivityStartToCloseLatency.With(handler).Record(startToCloseLatency)
+	}
+
+	scheduleToCloseLatency := time.Since(a.GetScheduleTime().AsTime())
+	metrics.ActivityScheduleToCloseLatency.With(handler).Record(scheduleToCloseLatency)
+
+	metrics.ActivityCancel.With(handler).Record(1)
+}
+
+func (a *Activity) emitOnTimedOutMetrics(ctx chasm.Context, handler metrics.Handler, timeoutType enumspb.TimeoutType) {
+	// TODO ignore err for now as it won't be there after rebase on main
+	attempt := a.LastAttempt.Get(ctx)
+	startedTime := attempt.GetStartedTime().AsTime()
+
+	startToCloseLatency := time.Since(startedTime)
+	metrics.ActivityStartToCloseLatency.With(handler).Record(startToCloseLatency)
+
+	scheduleToCloseLatency := time.Since(a.GetScheduleTime().AsTime())
+	metrics.ActivityScheduleToCloseLatency.With(handler).Record(scheduleToCloseLatency)
+
+	timeoutTag := metrics.StringTag("timeout_type", timeoutType.String())
+	metrics.ActivityTaskTimeout.With(handler).Record(1, timeoutTag)
+	metrics.ActivityTimeout.With(handler).Record(1, timeoutTag)
 }

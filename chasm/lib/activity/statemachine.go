@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"time"
 
-	commonpb "go.temporal.io/api/common/v1"
+	"go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
 	"go.temporal.io/api/workflowservice/v1"
-	"go.temporal.io/server/api/historyservice/v1"
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/chasm/lib/activity/gen/activitypb/v1"
+	"go.temporal.io/server/common/metrics"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -75,6 +75,7 @@ var TransitionScheduled = chasm.NewTransition(
 type rescheduleEvent struct {
 	retryInterval time.Duration
 	failure       *failurepb.Failure
+	timeoutType   enumspb.TimeoutType
 }
 
 // TransitionRescheduled affects a transition to Scheduled from Started, which happens on retries. The event to pass in
@@ -158,17 +159,22 @@ var TransitionCompleted = chasm.NewTransition(
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_COMPLETED,
-	func(a *Activity, ctx chasm.MutableContext, request *historyservice.RespondActivityTaskCompletedRequest) error {
+	func(a *Activity, ctx chasm.MutableContext, reqWrapper RespondCompletedReqWrapper) error {
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
+			req := reqWrapper.Request.GetCompleteRequest()
+
 			attempt := a.LastAttempt.Get(ctx)
 			attempt.CompleteTime = timestamppb.New(ctx.Now(a))
-			attempt.LastWorkerIdentity = request.GetCompleteRequest().GetIdentity()
+			attempt.LastWorkerIdentity = req.GetIdentity()
 			outcome := a.Outcome.Get(ctx)
 			outcome.Variant = &activitypb.ActivityOutcome_Successful_{
 				Successful: &activitypb.ActivityOutcome_Successful{
-					Output: request.GetCompleteRequest().GetResult(),
+					Output: req.GetResult(),
 				},
 			}
+
+			a.emitOnCompletedMetrics(ctx, reqWrapper.MetricsHandler)
+
 			return nil
 		})
 	},
@@ -181,16 +187,25 @@ var TransitionFailed = chasm.NewTransition(
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_FAILED,
-	func(a *Activity, ctx chasm.MutableContext, req *historyservice.RespondActivityTaskFailedRequest) error {
+	func(a *Activity, ctx chasm.MutableContext, reqWrapper RespondFailedReqWrapper) error {
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
-			if details := req.GetFailedRequest().GetLastHeartbeatDetails(); details != nil {
+			req := reqWrapper.Request.GetFailedRequest()
+
+			if details := req.GetLastHeartbeatDetails(); details != nil {
 				heartbeat := a.getOrCreateLastHeartbeat(ctx)
 				heartbeat.Details = details
 				heartbeat.RecordedTime = timestamppb.New(ctx.Now(a))
 			}
 			attempt := a.LastAttempt.Get(ctx)
-			attempt.LastWorkerIdentity = req.GetFailedRequest().GetIdentity()
-			return a.recordFailedAttempt(ctx, 0, req.GetFailedRequest().GetFailure(), true)
+			attempt.LastWorkerIdentity = req.GetIdentity()
+
+			if err := a.recordFailedAttempt(ctx, 0, req.GetFailure(), true); err != nil {
+				return err
+			}
+
+			a.emitOnFailedMetrics(ctx, reqWrapper.MetricsHandler)
+
+			return nil
 		})
 	},
 )
@@ -241,20 +256,25 @@ var TransitionCancelRequested = chasm.NewTransition(
 	},
 )
 
+type cancelEvent struct {
+	details *common.Payloads
+	handler metrics.Handler
+}
+
 // TransitionCanceled affects a transition to Canceled status
 var TransitionCanceled = chasm.NewTransition(
 	[]activitypb.ActivityExecutionStatus{
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_CANCELED,
-	func(a *Activity, ctx chasm.MutableContext, details *commonpb.Payloads) error {
+	func(a *Activity, ctx chasm.MutableContext, event cancelEvent) error {
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
 			outcome := a.Outcome.Get(ctx)
 			failure := &failurepb.Failure{
 				Message: "Activity canceled",
 				FailureInfo: &failurepb.Failure_CanceledFailureInfo{
 					CanceledFailureInfo: &failurepb.CanceledFailureInfo{
-						Details: details,
+						Details: event.details,
 					},
 				},
 			}
@@ -263,12 +283,21 @@ var TransitionCanceled = chasm.NewTransition(
 					Failure: failure,
 				},
 			}
+
+			a.emitOnCanceledMetrics(ctx, event.handler)
+
 			return nil
 		})
 	},
 )
 
 // TransitionTimedOut affects a transition to TimedOut status
+type timeoutEvent struct {
+	metricsHandler metrics.Handler
+	timeoutType    enumspb.TimeoutType
+}
+
+// TransitionTimedOut transitions to TimedOut status
 var TransitionTimedOut = chasm.NewTransition(
 	[]activitypb.ActivityExecutionStatus{
 		activitypb.ACTIVITY_EXECUTION_STATUS_SCHEDULED,
@@ -276,21 +305,31 @@ var TransitionTimedOut = chasm.NewTransition(
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_TIMED_OUT,
-	func(a *Activity, ctx chasm.MutableContext, timeoutType enumspb.TimeoutType) error {
+	func(a *Activity, ctx chasm.MutableContext, event timeoutEvent) error {
+		timeoutType := event.timeoutType
+
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
+			var err error
 			switch timeoutType {
 			case enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START,
 				enumspb.TIMEOUT_TYPE_SCHEDULE_TO_CLOSE:
-				return a.recordScheduleToStartOrCloseTimeoutFailure(ctx, timeoutType)
+				err = a.recordScheduleToStartOrCloseTimeoutFailure(ctx, timeoutType)
 			case enumspb.TIMEOUT_TYPE_START_TO_CLOSE:
 				failure := createStartToCloseTimeoutFailure()
-				return a.recordFailedAttempt(ctx, 0, failure, true)
+				err = a.recordFailedAttempt(ctx, 0, failure, true)
 			case enumspb.TIMEOUT_TYPE_HEARTBEAT:
 				failure := createHeartbeatTimeoutFailure()
-				return a.recordFailedAttempt(ctx, 0, failure, true)
+				err = a.recordFailedAttempt(ctx, 0, failure, true)
 			default:
-				return fmt.Errorf("unhandled activity timeout: %v", timeoutType)
+				err = fmt.Errorf("unhandled activity timeout: %v", timeoutType)
 			}
+			if err != nil {
+				return err
+			}
+
+			a.emitOnTimedOutMetrics(ctx, event.metricsHandler, timeoutType)
+
+			return nil
 		})
 	},
 )
