@@ -83,9 +83,15 @@ type RespondCancelledReqWrapper struct {
 	MetricsHandler metrics.Handler
 }
 
-// RequestCancelActivityReqWrapper wraps the RequestCancelActivityExecutionRequest with context-specific data.
-type RequestCancelActivityReqWrapper struct {
+// requestCancelActivityReqWrapper wraps the RequestCancelActivityExecutionRequest with context-specific data.
+type requestCancelActivityReqWrapper struct {
 	request        *activitypb.RequestCancelActivityExecutionRequest
+	metricsHandler metrics.Handler
+}
+
+// terminateActivityReqWrapper wraps the TerminateActivityExecutionRequest with context-specific data.
+type terminateActivityReqWrapper struct {
+	request        *activitypb.TerminateActivityExecutionRequest
 	metricsHandler metrics.Handler
 }
 
@@ -314,7 +320,7 @@ func (a *Activity) HandleCanceled(
 	return &historyservice.RespondActivityTaskCanceledResponse{}, nil
 }
 
-func (a *Activity) handleTerminated(ctx chasm.MutableContext, req *activitypb.TerminateActivityExecutionRequest) (
+func (a *Activity) handleTerminated(ctx chasm.MutableContext, req terminateActivityReqWrapper) (
 	*activitypb.TerminateActivityExecutionResponse, error,
 ) {
 	if err := TransitionTerminated.Apply(a, ctx, req); err != nil {
@@ -335,7 +341,7 @@ func (a *Activity) getOrCreateLastHeartbeat(ctx chasm.MutableContext) *activityp
 	return heartbeat
 }
 
-func (a *Activity) handleCancellationRequested(ctx chasm.MutableContext, reqWrapper RequestCancelActivityReqWrapper) (
+func (a *Activity) handleCancellationRequested(ctx chasm.MutableContext, reqWrapper requestCancelActivityReqWrapper) (
 	*activitypb.RequestCancelActivityExecutionResponse, error,
 ) {
 	req := reqWrapper.request.GetFrontendRequest()
@@ -689,7 +695,6 @@ func (a *Activity) StoreOrSelf(ctx chasm.Context) ActivityStore {
 }
 
 func (a *Activity) emitOnAttemptTimedOutMetrics(ctx chasm.Context, handler metrics.Handler, timeoutType enumspb.TimeoutType) {
-	// TODO ignore err for now as it won't be there after rebase on main
 	attempt := a.LastAttempt.Get(ctx)
 	startedTime := attempt.GetStartedTime().AsTime()
 
@@ -701,7 +706,6 @@ func (a *Activity) emitOnAttemptTimedOutMetrics(ctx chasm.Context, handler metri
 }
 
 func (a *Activity) emitOnAttemptFailedMetrics(ctx chasm.Context, handler metrics.Handler) {
-	// TODO ignore err for now as it won't be there after rebase on main
 	attempt := a.LastAttempt.Get(ctx)
 	startedTime := attempt.GetStartedTime().AsTime()
 
@@ -712,7 +716,6 @@ func (a *Activity) emitOnAttemptFailedMetrics(ctx chasm.Context, handler metrics
 }
 
 func (a *Activity) emitOnCompletedMetrics(ctx chasm.Context, handler metrics.Handler) {
-	// TODO ignore err for now as it won't be there after rebase on main
 	attempt := a.LastAttempt.Get(ctx)
 	startedTime := attempt.GetStartedTime().AsTime()
 
@@ -726,7 +729,6 @@ func (a *Activity) emitOnCompletedMetrics(ctx chasm.Context, handler metrics.Han
 }
 
 func (a *Activity) emitOnFailedMetrics(ctx chasm.Context, handler metrics.Handler) {
-	// TODO ignore err for now as it won't be there after rebase on main
 	attempt := a.LastAttempt.Get(ctx)
 	startedTime := attempt.GetStartedTime().AsTime()
 
@@ -741,7 +743,6 @@ func (a *Activity) emitOnFailedMetrics(ctx chasm.Context, handler metrics.Handle
 }
 
 func (a *Activity) emitOnCanceledMetrics(ctx chasm.Context, handler metrics.Handler) {
-	// TODO ignore err for now as it won't be there after rebase on main
 	attempt := a.LastAttempt.Get(ctx)
 	startedTime := attempt.GetStartedTime().AsTime()
 
@@ -757,8 +758,23 @@ func (a *Activity) emitOnCanceledMetrics(ctx chasm.Context, handler metrics.Hand
 	metrics.ActivityCancel.With(handler).Record(1)
 }
 
+func (a *Activity) emitOnTerminatedMetrics(ctx chasm.Context, handler metrics.Handler) {
+	attempt := a.LastAttempt.Get(ctx)
+	startedTime := attempt.GetStartedTime().AsTime()
+
+	// Terminate can happen before start, so guard against zero time
+	if !startedTime.IsZero() {
+		startToCloseLatency := time.Since(startedTime)
+		metrics.ActivityStartToCloseLatency.With(handler).Record(startToCloseLatency)
+	}
+
+	scheduleToCloseLatency := time.Since(a.GetScheduleTime().AsTime())
+	metrics.ActivityScheduleToCloseLatency.With(handler).Record(scheduleToCloseLatency)
+
+	metrics.ActivityTerminate.With(handler).Record(1)
+}
+
 func (a *Activity) emitOnTimedOutMetrics(ctx chasm.Context, handler metrics.Handler, timeoutType enumspb.TimeoutType) {
-	// TODO ignore err for now as it won't be there after rebase on main
 	attempt := a.LastAttempt.Get(ctx)
 	startedTime := attempt.GetStartedTime().AsTime()
 

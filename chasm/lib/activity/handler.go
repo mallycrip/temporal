@@ -232,11 +232,37 @@ func (h *handler) TerminateActivityExecution(
 		RunID:       frontendReq.GetRunId(),
 	})
 
+	breakdownMetricsByTaskQueue := h.config.BreakdownMetricsByTaskQueue
+	namespaceName, err := h.namespaceRegistry.GetNamespaceName(namespace.ID(req.GetNamespaceId()))
+	if err != nil {
+		return nil, err
+	}
+
+	metricsHandlerBuilderParams, err := chasm.ReadComponent(ctx, ref, (*Activity).GetMetricsHandlerParams, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	taskQueueFamily := metricsHandlerBuilderParams.TaskQueueName
+
+	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+		h.metricsHandler,
+		namespaceName.String(),
+		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
+		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
+		metrics.ActivityTypeTag(metricsHandlerBuilderParams.ActivityType),
+		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+	)
+
 	response, _, err = chasm.UpdateComponent(
 		ctx,
 		ref,
 		(*Activity).handleTerminated,
-		req,
+		terminateActivityReqWrapper{
+			request:        req,
+			metricsHandler: metricsHandler,
+		},
 	)
 
 	if err != nil {
@@ -286,7 +312,7 @@ func (h *handler) RequestCancelActivityExecution(
 		ctx,
 		ref,
 		(*Activity).handleCancellationRequested,
-		RequestCancelActivityReqWrapper{
+		requestCancelActivityReqWrapper{
 			request:        req,
 			metricsHandler: metricsHandler,
 		},

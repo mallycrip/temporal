@@ -569,22 +569,44 @@ func TestTransitionTerminated(t *testing.T) {
 
 	activity := &Activity{
 		ActivityState: &activitypb.ActivityState{
+			ActivityType:           &commonpb.ActivityType{Name: "test-activity-type"},
 			RetryPolicy:            defaultRetryPolicy,
 			ScheduleToCloseTimeout: durationpb.New(defaultScheduleToCloseTimeout),
 			ScheduleToStartTimeout: durationpb.New(defaultScheduleToStartTimeout),
 			StartToCloseTimeout:    durationpb.New(defaultStartToCloseTimeout),
 			Status:                 activitypb.ACTIVITY_EXECUTION_STATUS_STARTED,
+			TaskQueue:              &taskqueuepb.TaskQueue{Name: "test-task-queue"},
 		},
 		LastAttempt: chasm.NewDataField(ctx, attemptState),
 		Outcome:     chasm.NewDataField(ctx, outcome),
 	}
 
-	err := TransitionTerminated.Apply(activity, ctx, &activitypb.TerminateActivityExecutionRequest{
-		FrontendRequest: &workflowservice.TerminateActivityExecutionRequest{
-			Reason:   "Test Termination",
-			Identity: "terminator",
+	controller := gomock.NewController(t)
+	metricsHandler := metrics.NewMockHandler(controller)
+
+	timerStartToCloseLatency := metrics.NewMockTimerIface(controller)
+	timerStartToCloseLatency.EXPECT().Record(gomock.Any()).Times(1)
+	metricsHandler.EXPECT().Timer(metrics.ActivityStartToCloseLatency.Name()).Return(timerStartToCloseLatency)
+
+	timerScheduleToCloseLatency := metrics.NewMockTimerIface(controller)
+	timerScheduleToCloseLatency.EXPECT().Record(gomock.Any()).Times(1)
+	metricsHandler.EXPECT().Timer(metrics.ActivityScheduleToCloseLatency.Name()).Return(timerScheduleToCloseLatency)
+
+	counterCancel := metrics.NewMockCounterIface(controller)
+	counterCancel.EXPECT().Record(int64(1)).Times(1)
+	metricsHandler.EXPECT().Counter(metrics.ActivityCancel.Name()).Return(counterCancel)
+
+	reqWrapper := terminateActivityReqWrapper{
+		request: &activitypb.TerminateActivityExecutionRequest{
+			FrontendRequest: &workflowservice.TerminateActivityExecutionRequest{
+				Reason:   "Test Termination",
+				Identity: "terminator",
+			},
 		},
-	})
+		metricsHandler: metricsHandler,
+	}
+
+	err := TransitionTerminated.Apply(activity, ctx, reqWrapper)
 	require.NoError(t, err)
 	require.Equal(t, activitypb.ACTIVITY_EXECUTION_STATUS_TERMINATED, activity.Status)
 	require.EqualValues(t, 1, attemptState.Count)

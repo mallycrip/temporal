@@ -218,12 +218,12 @@ var TransitionTerminated = chasm.NewTransition(
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_TERMINATED,
-	func(a *Activity, ctx chasm.MutableContext, req *activitypb.TerminateActivityExecutionRequest) error {
+	func(a *Activity, ctx chasm.MutableContext, reqWrapper terminateActivityReqWrapper) error {
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
 			outcome := a.Outcome.Get(ctx)
 			failure := &failurepb.Failure{
 				// TODO if the reason isn't provided, perhaps set a default reason. Also see if we should prefix with "Activity terminated: "
-				Message:     req.GetFrontendRequest().GetReason(),
+				Message:     reqWrapper.request.GetFrontendRequest().GetReason(),
 				FailureInfo: &failurepb.Failure_TerminatedFailureInfo{},
 			}
 			outcome.Variant = &activitypb.ActivityOutcome_Failed_{
@@ -231,6 +231,9 @@ var TransitionTerminated = chasm.NewTransition(
 					Failure: failure,
 				},
 			}
+
+			a.emitOnCanceledMetrics(ctx, reqWrapper.metricsHandler)
+
 			return nil
 		})
 	},
