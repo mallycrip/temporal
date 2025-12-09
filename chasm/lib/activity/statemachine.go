@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"go.temporal.io/api/common/v1"
+	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -257,7 +257,7 @@ var TransitionCancelRequested = chasm.NewTransition(
 )
 
 type cancelEvent struct {
-	details *common.Payloads
+	details *commonpb.Payloads
 	handler metrics.Handler
 }
 
