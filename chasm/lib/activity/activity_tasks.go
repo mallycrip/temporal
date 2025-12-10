@@ -9,7 +9,6 @@ import (
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/resource"
-	"go.temporal.io/server/common/tqid"
 	"go.temporal.io/server/common/util"
 	"go.uber.org/fx"
 )
@@ -96,24 +95,17 @@ func (e *scheduleToStartTimeoutTaskExecutor) Execute(
 	_ chasm.TaskAttributes,
 	_ *activitypb.ScheduleToStartTimeoutTask,
 ) error {
-	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
 	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
 	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
 	if err != nil {
 		return err
 	}
 
-	taskQueueFamily := activity.GetTaskQueue().GetName()
-
-	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+	metricsHandler := activity.enrichMetricsHandler(
 		e.opts.MetricsHandler,
 		namespaceName.String(),
-		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
-		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
-		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
-		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
-		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
-	)
+		metrics.TimerActiveTaskActivityTimeoutScope,
+		e.opts.Config.BreakdownMetricsByTaskQueue)
 
 	event := timeoutEvent{
 		timeoutType:    enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START,
@@ -148,24 +140,17 @@ func (e *scheduleToCloseTimeoutTaskExecutor) Execute(
 	_ chasm.TaskAttributes,
 	_ *activitypb.ScheduleToCloseTimeoutTask,
 ) error {
-	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
 	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
 	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
 	if err != nil {
 		return err
 	}
 
-	taskQueueFamily := activity.GetTaskQueue().GetName()
-
-	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+	metricsHandler := activity.enrichMetricsHandler(
 		e.opts.MetricsHandler,
 		namespaceName.String(),
-		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
-		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
-		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
-		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
-		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
-	)
+		metrics.TimerActiveTaskActivityTimeoutScope,
+		e.opts.Config.BreakdownMetricsByTaskQueue)
 
 	event := timeoutEvent{
 		timeoutType:    enumspb.TIMEOUT_TYPE_SCHEDULE_TO_CLOSE,
@@ -207,24 +192,17 @@ func (e *startToCloseTimeoutTaskExecutor) Execute(
 		return err
 	}
 
-	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
 	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
 	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
 	if err != nil {
 		return err
 	}
 
-	taskQueueFamily := activity.GetTaskQueue().GetName()
-
-	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+	metricsHandler := activity.enrichMetricsHandler(
 		e.opts.MetricsHandler,
 		namespaceName.String(),
-		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
-		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
-		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
-		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
-		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
-	)
+		metrics.TimerActiveTaskActivityTimeoutScope,
+		e.opts.Config.BreakdownMetricsByTaskQueue)
 
 	// Retry task if we have remaining attempts and time. A retry involves transitioning the activity back to scheduled state.
 	if shouldRetry {
@@ -314,24 +292,17 @@ func (e *heartbeatTimeoutTaskExecutor) Execute(
 		return err
 	}
 
-	breakdownMetricsByTaskQueue := e.opts.Config.BreakdownMetricsByTaskQueue
 	nsID := namespace.ID(ctx.ExecutionKey().NamespaceID)
 	namespaceName, err := e.opts.NamespaceRegistry.GetNamespaceName(nsID)
 	if err != nil {
 		return err
 	}
 
-	taskQueueFamily := activity.GetTaskQueue().GetName()
-
-	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
+	metricsHandler := activity.enrichMetricsHandler(
 		e.opts.MetricsHandler,
 		namespaceName.String(),
-		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
-		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
-		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
-		metrics.ActivityTypeTag(activity.GetActivityType().GetName()),
-		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
-	)
+		metrics.TimerActiveTaskActivityTimeoutScope,
+		e.opts.Config.BreakdownMetricsByTaskQueue)
 
 	if shouldRetry {
 		err = TransitionRescheduled.Apply(activity, ctx, rescheduleEvent{

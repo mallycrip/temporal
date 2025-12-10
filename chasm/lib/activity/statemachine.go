@@ -159,9 +159,9 @@ var TransitionCompleted = chasm.NewTransition(
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_COMPLETED,
-	func(a *Activity, ctx chasm.MutableContext, reqWrapper RespondCompletedReqWrapper) error {
+	func(a *Activity, ctx chasm.MutableContext, event RespondCompletedEvent) error {
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
-			req := reqWrapper.Request.GetCompleteRequest()
+			req := event.Request.GetCompleteRequest()
 
 			attempt := a.LastAttempt.Get(ctx)
 			attempt.CompleteTime = timestamppb.New(ctx.Now(a))
@@ -173,7 +173,9 @@ var TransitionCompleted = chasm.NewTransition(
 				},
 			}
 
-			a.emitOnCompletedMetrics(ctx, reqWrapper.MetricsHandler)
+			metricsHandler := event.HandlerBuilder(a.GetActivityType().GetName(), a.GetTaskQueue().GetName())
+
+			a.emitOnCompletedMetrics(ctx, metricsHandler)
 
 			return nil
 		})
@@ -187,9 +189,9 @@ var TransitionFailed = chasm.NewTransition(
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_FAILED,
-	func(a *Activity, ctx chasm.MutableContext, reqWrapper RespondFailedReqWrapper) error {
+	func(a *Activity, ctx chasm.MutableContext, event RespondFailedEvent) error {
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
-			req := reqWrapper.Request.GetFailedRequest()
+			req := event.Request.GetFailedRequest()
 
 			if details := req.GetLastHeartbeatDetails(); details != nil {
 				heartbeat := a.getOrCreateLastHeartbeat(ctx)
@@ -203,7 +205,9 @@ var TransitionFailed = chasm.NewTransition(
 				return err
 			}
 
-			a.emitOnFailedMetrics(ctx, reqWrapper.MetricsHandler)
+			metricsHandler := event.HandlerBuilder(a.GetActivityType().GetName(), a.GetTaskQueue().GetName())
+
+			a.emitOnFailedMetrics(ctx, metricsHandler)
 
 			return nil
 		})
@@ -218,12 +222,12 @@ var TransitionTerminated = chasm.NewTransition(
 		activitypb.ACTIVITY_EXECUTION_STATUS_CANCEL_REQUESTED,
 	},
 	activitypb.ACTIVITY_EXECUTION_STATUS_TERMINATED,
-	func(a *Activity, ctx chasm.MutableContext, reqWrapper terminateActivityReqWrapper) error {
+	func(a *Activity, ctx chasm.MutableContext, event terminateEvent) error {
 		return a.StoreOrSelf(ctx).RecordCompleted(ctx, func(ctx chasm.MutableContext) error {
 			outcome := a.Outcome.Get(ctx)
 			failure := &failurepb.Failure{
 				// TODO if the reason isn't provided, perhaps set a default reason. Also see if we should prefix with "Activity terminated: "
-				Message:     reqWrapper.request.GetFrontendRequest().GetReason(),
+				Message:     event.request.GetFrontendRequest().GetReason(),
 				FailureInfo: &failurepb.Failure_TerminatedFailureInfo{},
 			}
 			outcome.Variant = &activitypb.ActivityOutcome_Failed_{
@@ -232,7 +236,9 @@ var TransitionTerminated = chasm.NewTransition(
 				},
 			}
 
-			a.emitOnCanceledMetrics(ctx, reqWrapper.metricsHandler)
+			metricsHandler := event.handlerBuilder(a.GetActivityType().GetName(), a.GetTaskQueue().GetName())
+
+			metrics.ActivityTerminate.With(metricsHandler).Record(1)
 
 			return nil
 		})

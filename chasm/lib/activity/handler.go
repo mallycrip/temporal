@@ -121,11 +121,11 @@ func (h *handler) DescribeActivityExecution(
 	// deadline that causes us to send that response before the caller's own deadline (see
 	// chasm.activity.longPollBuffer). We also cap the caller's deadline at
 	// chasm.activity.longPollTimeout.
-	namespace := req.GetFrontendRequest().GetNamespace()
+	ns := req.GetFrontendRequest().GetNamespace()
 	ctx, cancel := contextutil.WithDeadlineBuffer(
 		ctx,
-		h.config.LongPollTimeout(namespace),
-		h.config.LongPollBuffer(namespace),
+		h.config.LongPollTimeout(ns),
+		h.config.LongPollBuffer(ns),
 	)
 	defer cancel()
 
@@ -190,11 +190,11 @@ func (h *handler) GetActivityExecutionOutcome(
 	// deadline that causes us to send that response before the caller's own deadline (see
 	// chasm.activity.longPollBuffer). We also cap the caller's deadline at
 	// chasm.activity.longPollTimeout.
-	namespace := req.GetFrontendRequest().GetNamespace()
+	ns := req.GetFrontendRequest().GetNamespace()
 	ctx, cancel := contextutil.WithDeadlineBuffer(
 		ctx,
-		h.config.LongPollTimeout(namespace),
-		h.config.LongPollBuffer(namespace),
+		h.config.LongPollTimeout(ns),
+		h.config.LongPollBuffer(ns),
 	)
 	defer cancel()
 
@@ -232,36 +232,29 @@ func (h *handler) TerminateActivityExecution(
 		RunID:       frontendReq.GetRunId(),
 	})
 
-	breakdownMetricsByTaskQueue := h.config.BreakdownMetricsByTaskQueue
 	namespaceName, err := h.namespaceRegistry.GetNamespaceName(namespace.ID(req.GetNamespaceId()))
 	if err != nil {
 		return nil, err
 	}
 
-	metricsHandlerBuilderParams, err := chasm.ReadComponent(ctx, ref, (*Activity).GetMetricsHandlerParams, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	taskQueueFamily := metricsHandlerBuilderParams.TaskQueueName
-
-	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
-		h.metricsHandler,
-		namespaceName.String(),
-		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
-		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
-		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
-		metrics.ActivityTypeTag(metricsHandlerBuilderParams.ActivityType),
-		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
-	)
-
 	response, _, err = chasm.UpdateComponent(
 		ctx,
 		ref,
 		(*Activity).handleTerminated,
-		terminateActivityReqWrapper{
-			request:        req,
-			metricsHandler: metricsHandler,
+		terminateEvent{
+			request: req,
+			handlerBuilder: func(activityType string, taskQueueName string) metrics.Handler {
+				return metrics.GetPerTaskQueueFamilyScope(
+					h.metricsHandler,
+					namespaceName.String(),
+					tqid.UnsafeTaskQueueFamily(req.GetNamespaceId(), taskQueueName),
+					h.config.BreakdownMetricsByTaskQueue(namespaceName.String(), taskQueueName, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+					metrics.OperationTag(metrics.ActivityTerminatedScope),
+					metrics.ActivityTypeTag(activityType),
+					metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+					metrics.WorkflowTypeTag(WorkflowTypeTag),
+				)
+			},
 		},
 	)
 
@@ -285,36 +278,29 @@ func (h *handler) RequestCancelActivityExecution(
 		RunID:       frontendReq.GetRunId(),
 	})
 
-	breakdownMetricsByTaskQueue := h.config.BreakdownMetricsByTaskQueue
 	namespaceName, err := h.namespaceRegistry.GetNamespaceName(namespace.ID(req.GetNamespaceId()))
 	if err != nil {
 		return nil, err
 	}
 
-	metricsHandlerBuilderParams, err := chasm.ReadComponent(ctx, ref, (*Activity).GetMetricsHandlerParams, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	taskQueueFamily := metricsHandlerBuilderParams.TaskQueueName
-
-	metricsHandler := metrics.GetPerTaskQueueFamilyScope(
-		h.metricsHandler,
-		namespaceName.String(),
-		tqid.UnsafeTaskQueueFamily(namespaceName.String(), taskQueueFamily),
-		breakdownMetricsByTaskQueue(namespaceName.String(), taskQueueFamily, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
-		metrics.OperationTag(metrics.TimerActiveTaskActivityTimeoutScope),
-		metrics.ActivityTypeTag(metricsHandlerBuilderParams.ActivityType),
-		metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
-	)
-
 	response, _, err = chasm.UpdateComponent(
 		ctx,
 		ref,
 		(*Activity).handleCancellationRequested,
-		requestCancelActivityReqWrapper{
-			request:        req,
-			metricsHandler: metricsHandler,
+		requestCancelEvent{
+			request: req,
+			handlerBuilder: func(activityType string, taskQueueName string) metrics.Handler {
+				return metrics.GetPerTaskQueueFamilyScope(
+					h.metricsHandler,
+					namespaceName.String(),
+					tqid.UnsafeTaskQueueFamily(req.GetNamespaceId(), taskQueueName),
+					h.config.BreakdownMetricsByTaskQueue(namespaceName.String(), taskQueueName, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+					metrics.OperationTag(metrics.HistoryRespondActivityTaskCanceledScope),
+					metrics.ActivityTypeTag(activityType),
+					metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+					metrics.WorkflowTypeTag(WorkflowTypeTag),
+				)
+			},
 		},
 	)
 	if err != nil {

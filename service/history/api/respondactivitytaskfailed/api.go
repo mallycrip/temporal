@@ -42,31 +42,25 @@ func Invoke(
 
 	// Handle standalone activity if component ref is present in the token
 	if componentRef := token.GetComponentRef(); len(componentRef) > 0 {
-		metricsHandlerBuilderParams, err := chasm.ReadComponent(ctx, componentRef, (*activity.Activity).GetMetricsHandlerParams, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		taskQueueName := metricsHandlerBuilderParams.TaskQueueName
-
-		handler := metrics.GetPerTaskQueueFamilyScope(
-			shard.GetMetricsHandler(),
-			namespace.String(),
-			tqid.UnsafeTaskQueueFamily(req.GetNamespaceId(), taskQueueName),
-			shard.GetConfig().BreakdownMetricsByTaskQueue(namespace.String(), taskQueueName, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
-			metrics.OperationTag(metrics.HistoryRespondActivityTaskFailedScope),
-			metrics.ActivityTypeTag(metricsHandlerBuilderParams.ActivityType),
-			metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
-		)
-
 		response, _, err := chasm.UpdateComponent(
 			ctx,
 			componentRef,
 			(*activity.Activity).HandleFailed,
-			activity.RespondFailedReqWrapper{
-				Request:        req,
-				Token:          token,
-				MetricsHandler: handler,
+			activity.RespondFailedEvent{
+				Request: req,
+				Token:   token,
+				HandlerBuilder: func(activityType string, taskQueueName string) metrics.Handler {
+					return metrics.GetPerTaskQueueFamilyScope(
+						shard.GetMetricsHandler(),
+						namespace.String(),
+						tqid.UnsafeTaskQueueFamily(req.GetNamespaceId(), taskQueueName),
+						shard.GetConfig().BreakdownMetricsByTaskQueue(namespace.String(), taskQueueName, enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+						metrics.OperationTag(metrics.HistoryRespondActivityTaskFailedScope),
+						metrics.ActivityTypeTag(activityType),
+						metrics.VersioningBehaviorTag(enumspb.VERSIONING_BEHAVIOR_UNSPECIFIED),
+						metrics.WorkflowTypeTag(activity.WorkflowTypeTag),
+					)
+				},
 			},
 		)
 

@@ -464,14 +464,16 @@ func TestTransitionCompleted(t *testing.T) {
 	counterSuccess.EXPECT().Record(int64(1)).Times(1)
 	metricsHandler.EXPECT().Counter(metrics.ActivitySuccess.Name()).Return(counterSuccess)
 
-	req := RespondCompletedReqWrapper{
+	req := RespondCompletedEvent{
 		Request: &historyservice.RespondActivityTaskCompletedRequest{
 			CompleteRequest: &workflowservice.RespondActivityTaskCompletedRequest{
 				Result:   payload,
 				Identity: "worker",
 			},
 		},
-		MetricsHandler: metricsHandler,
+		HandlerBuilder: func(_ string, _ string) metrics.Handler {
+			return metricsHandler
+		},
 	}
 
 	err := TransitionCompleted.Apply(activity, ctx, req)
@@ -533,7 +535,7 @@ func TestTransitionFailed(t *testing.T) {
 	counterTaskFail.EXPECT().Record(int64(1)).Times(1)
 	metricsHandler.EXPECT().Counter(metrics.ActivityTaskFail.Name()).Return(counterTaskFail)
 
-	req := RespondFailedReqWrapper{
+	req := RespondFailedEvent{
 		Request: &historyservice.RespondActivityTaskFailedRequest{
 			FailedRequest: &workflowservice.RespondActivityTaskFailedRequest{
 				Failure:              failure,
@@ -541,7 +543,9 @@ func TestTransitionFailed(t *testing.T) {
 				Identity:             "worker",
 			},
 		},
-		MetricsHandler: metricsHandler,
+		HandlerBuilder: func(_ string, _ string) metrics.Handler {
+			return metricsHandler
+		},
 	}
 
 	err := TransitionFailed.Apply(activity, ctx, req)
@@ -584,26 +588,20 @@ func TestTransitionTerminated(t *testing.T) {
 	controller := gomock.NewController(t)
 	metricsHandler := metrics.NewMockHandler(controller)
 
-	timerStartToCloseLatency := metrics.NewMockTimerIface(controller)
-	timerStartToCloseLatency.EXPECT().Record(gomock.Any()).Times(1)
-	metricsHandler.EXPECT().Timer(metrics.ActivityStartToCloseLatency.Name()).Return(timerStartToCloseLatency)
-
-	timerScheduleToCloseLatency := metrics.NewMockTimerIface(controller)
-	timerScheduleToCloseLatency.EXPECT().Record(gomock.Any()).Times(1)
-	metricsHandler.EXPECT().Timer(metrics.ActivityScheduleToCloseLatency.Name()).Return(timerScheduleToCloseLatency)
-
 	counterCancel := metrics.NewMockCounterIface(controller)
 	counterCancel.EXPECT().Record(int64(1)).Times(1)
-	metricsHandler.EXPECT().Counter(metrics.ActivityCancel.Name()).Return(counterCancel)
+	metricsHandler.EXPECT().Counter(metrics.ActivityTerminate.Name()).Return(counterCancel)
 
-	reqWrapper := terminateActivityReqWrapper{
+	reqWrapper := terminateEvent{
 		request: &activitypb.TerminateActivityExecutionRequest{
 			FrontendRequest: &workflowservice.TerminateActivityExecutionRequest{
 				Reason:   "Test Termination",
 				Identity: "terminator",
 			},
 		},
-		metricsHandler: metricsHandler,
+		handlerBuilder: func(_ string, _ string) metrics.Handler {
+			return metricsHandler
+		},
 	}
 
 	err := TransitionTerminated.Apply(activity, ctx, reqWrapper)
