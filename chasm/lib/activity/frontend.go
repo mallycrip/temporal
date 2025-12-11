@@ -10,7 +10,6 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/server/chasm/lib/activity/gen/activitypb/v1"
 	"go.temporal.io/server/common"
-	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/namespace"
@@ -32,7 +31,7 @@ type FrontendHandler interface {
 type frontendHandler struct {
 	FrontendHandler
 	client            activitypb.ActivityServiceClient
-	dc                *dynamicconfig.Collection
+	config            *Config
 	logger            log.Logger
 	metricsHandler    metrics.Handler
 	namespaceRegistry namespace.Registry
@@ -43,7 +42,7 @@ type frontendHandler struct {
 // NewFrontendHandler creates a new FrontendHandler instance for processing activity frontend requests.
 func NewFrontendHandler(
 	client activitypb.ActivityServiceClient,
-	dc *dynamicconfig.Collection,
+	config *Config,
 	logger log.Logger,
 	metricsHandler metrics.Handler,
 	namespaceRegistry namespace.Registry,
@@ -52,7 +51,7 @@ func NewFrontendHandler(
 ) FrontendHandler {
 	return &frontendHandler{
 		client:            client,
-		dc:                dc,
+		config:            config,
 		logger:            logger,
 		metricsHandler:    metricsHandler,
 		namespaceRegistry: namespaceRegistry,
@@ -71,6 +70,10 @@ func NewFrontendHandler(
 // before mutation to preserve the original for retries.
 // 3. Sends the request to the history activity service.
 func (h *frontendHandler) StartActivityExecution(ctx context.Context, req *workflowservice.StartActivityExecutionRequest) (*workflowservice.StartActivityExecutionResponse, error) {
+	if !h.config.Enabled(req.GetNamespace()) {
+		return nil, serviceerror.NewUnavailable("Standalone activity is disabled.")
+	}
+
 	namespaceID, err := h.namespaceRegistry.GetNamespaceID(namespace.Name(req.GetNamespace()))
 	if err != nil {
 		return nil, err
@@ -95,9 +98,13 @@ func (h *frontendHandler) DescribeActivityExecution(
 	ctx context.Context,
 	req *workflowservice.DescribeActivityExecutionRequest,
 ) (*workflowservice.DescribeActivityExecutionResponse, error) {
+	if !h.config.Enabled(req.GetNamespace()) {
+		return nil, serviceerror.NewUnavailable("Standalone activity is disabled.")
+	}
+
 	err := ValidateDescribeActivityExecutionRequest(
 		req,
-		dynamicconfig.MaxIDLengthLimit.Get(h.dc)(),
+		h.config.MaxIDLengthLimit(),
 	)
 	if err != nil {
 		return nil, err
@@ -120,9 +127,13 @@ func (h *frontendHandler) GetActivityExecutionOutcome(
 	ctx context.Context,
 	req *workflowservice.GetActivityExecutionOutcomeRequest,
 ) (*workflowservice.GetActivityExecutionOutcomeResponse, error) {
+	if !h.config.Enabled(req.GetNamespace()) {
+		return nil, serviceerror.NewUnavailable("Standalone activity is disabled.")
+	}
+
 	err := ValidateGetActivityExecutionOutcomeRequest(
 		req,
-		dynamicconfig.MaxIDLengthLimit.Get(h.dc)(),
+		h.config.MaxIDLengthLimit(),
 	)
 	if err != nil {
 		return nil, err
@@ -143,6 +154,10 @@ func (h *frontendHandler) TerminateActivityExecution(
 	ctx context.Context,
 	req *workflowservice.TerminateActivityExecutionRequest,
 ) (*workflowservice.TerminateActivityExecutionResponse, error) {
+	if !h.config.Enabled(req.GetNamespace()) {
+		return nil, serviceerror.NewUnavailable("Standalone activity is disabled.")
+	}
+
 	namespaceName := req.GetNamespace()
 	namespaceID, err := h.namespaceRegistry.GetNamespaceID(namespace.Name(namespaceName))
 	if err != nil {
@@ -152,8 +167,8 @@ func (h *frontendHandler) TerminateActivityExecution(
 	if err := validateInputSize(
 		req.GetActivityId(),
 		"activity-termination",
-		dynamicconfig.BlobSizeLimitError.Get(h.dc),
-		dynamicconfig.BlobSizeLimitWarn.Get(h.dc),
+		h.config.BlobSizeLimitError,
+		h.config.BlobSizeLimitWarn,
 		len(req.GetReason()),
 		h.logger,
 		namespaceName); err != nil {
@@ -177,6 +192,10 @@ func (h *frontendHandler) RequestCancelActivityExecution(
 	ctx context.Context,
 	req *workflowservice.RequestCancelActivityExecutionRequest,
 ) (*workflowservice.RequestCancelActivityExecutionResponse, error) {
+	if !h.config.Enabled(req.GetNamespace()) {
+		return nil, serviceerror.NewUnavailable("Standalone activity is disabled.")
+	}
+
 	namespaceID, err := h.namespaceRegistry.GetNamespaceID(namespace.Name(req.GetNamespace()))
 	if err != nil {
 		return nil, err
@@ -185,7 +204,7 @@ func (h *frontendHandler) RequestCancelActivityExecution(
 	// Since validation potentially mutates the request, we clone it first so that any retries use the original request.
 	req = common.CloneProto(req)
 
-	maxIDLen := dynamicconfig.MaxIDLengthLimit.Get(h.dc)()
+	maxIDLen := h.config.MaxIDLengthLimit()
 
 	if len(req.GetRequestId()) > maxIDLen {
 		return nil, serviceerror.NewInvalidArgument("RequestID length exceeds limit.")
@@ -214,6 +233,10 @@ func (h *frontendHandler) validateAndPopulateStartRequest(
 	req *workflowservice.StartActivityExecutionRequest,
 	namespaceID namespace.ID,
 ) (*workflowservice.StartActivityExecutionRequest, error) {
+	if !h.config.Enabled(req.GetNamespace()) {
+		return nil, serviceerror.NewUnavailable("Standalone activity is disabled.")
+	}
+
 	// Since validation includes mutation of the request, we clone it first so that any retries use the original request.
 	req = common.CloneProto(req)
 	activityType := req.ActivityType.GetName()
@@ -226,8 +249,8 @@ func (h *frontendHandler) validateAndPopulateStartRequest(
 	err := ValidateAndNormalizeActivityAttributes(
 		req.ActivityId,
 		activityType,
-		dynamicconfig.DefaultActivityRetryPolicy.Get(h.dc),
-		dynamicconfig.MaxIDLengthLimit.Get(h.dc)(),
+		h.config.DefaultActivityRetryPolicy,
+		h.config.MaxIDLengthLimit(),
 		namespaceID,
 		opts,
 		req.Priority,
@@ -240,10 +263,10 @@ func (h *frontendHandler) validateAndPopulateStartRequest(
 
 	err = validateAndNormalizeStartActivityExecutionRequest(
 		req,
-		dynamicconfig.BlobSizeLimitError.Get(h.dc),
-		dynamicconfig.BlobSizeLimitWarn.Get(h.dc),
+		h.config.BlobSizeLimitError,
+		h.config.BlobSizeLimitWarn,
 		h.logger,
-		dynamicconfig.MaxIDLengthLimit.Get(h.dc)(),
+		h.config.MaxIDLengthLimit(),
 		h.saValidator)
 	if err != nil {
 		return nil, err
